@@ -72,11 +72,15 @@ POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 # ─────────────────────────────────────────────
 # EV Gap Strategy
 # ─────────────────────────────────────────────
-EV_MIN_GAP = 0.07              # 7% minimum EV gap (optimized via 3-day sweep)
+EV_MIN_GAP = 0.15              # 15% minimum EV gap (more conservative)
 EV_MAX_MARKET_PROB = 0.75      # Skip if market already moved > 75%
 EV_FLAT_POSITION_PCT = 0.05    # 5% of capital per trade (flat sizing)
 
 # ─────────────────────────────────────────────
+# Live Trading specific
+# ─────────────────────────────────────────────
+LIVE_TRADE_AMOUNT_USD = 5.00   # Exact dollar amount (USDC) to bet per trade
+LIVE_DRY_RUN = True            # Set False to execute real trades on mainnet
 # Logging
 # ─────────────────────────────────────────────
 TRADE_JOURNAL_FILE = "trade_journal.csv"

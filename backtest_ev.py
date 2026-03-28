@@ -41,57 +41,43 @@ class C:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Data Fetching (reuse from backtest.py)
+# Data Fetching (Pyth Benchmarks)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def fetch_binance_klines(total_candles: int = 300) -> list:
-    """Fetch 1-minute BTC/USDT candles from Binance REST API."""
-    url = "https://api.binance.com/api/v3/klines"
-    all_candles = []
-    end_time = None
-    remaining = total_candles
+def fetch_pyth_klines(total_candles: int = 300) -> list:
+    """Fetch historical 1-minute BTC/USD candles from Pyth Benchmarks."""
+    print(f"  Fetching {total_candles} 1-min BTC/USD candles from Pyth...", end=" ", flush=True)
 
-    print(f"  Fetching {total_candles} 1-min BTC candles from Binance...", end=" ", flush=True)
+    end_time = int(time.time())
+    start_time = end_time - int((total_candles + 60) * 60) # Fetch an extra hour buffer to ensure enough data
+    
+    url = f"https://benchmarks.pyth.network/v1/shims/tradingview/history?symbol=Crypto.BTC%2FUSD&resolution=1&from={start_time}&to={end_time}"
+    
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"\\n  ❌ Pyth API error: {e}")
+        return []
 
-    while remaining > 0:
-        batch_size = min(remaining, 1000)
-        params = {
-            "symbol": "BTCUSDT",
-            "interval": "1m",
-            "limit": batch_size,
-        }
-        if end_time:
-            params["endTime"] = end_time - 1
+    if data.get("s") != "ok" or not data.get("t"):
+        print(f"\\n  ❌ No data returned from Pyth.")
+        return []
 
-        try:
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            print(f"\n  ❌ Binance API error: {e}")
-            break
+    candles = []
+    for i in range(len(data["t"])):
+        candles.append({
+            "timestamp": data["t"][i] * 1000,
+            "open": float(data["o"][i]),
+            "high": float(data["h"][i]),
+            "low": float(data["l"][i]),
+            "close": float(data["c"][i]),
+            "volume": float(data.get("v", [0]*len(data["t"]))[i]),
+        })
 
-        if not data:
-            break
-
-        candles = []
-        for d in data:
-            candles.append({
-                "timestamp": d[0],
-                "open": float(d[1]),
-                "high": float(d[2]),
-                "low": float(d[3]),
-                "close": float(d[4]),
-                "volume": float(d[5]),
-            })
-
-        all_candles = candles + all_candles
-        end_time = data[0][0]
-        remaining -= len(data)
-
-        if len(data) < batch_size:
-            break
-        time.sleep(0.2)
+    # Slice to exact requested amount 
+    all_candles = candles[-total_candles:] if len(candles) >= total_candles else candles
 
     print(f"✓ {len(all_candles)} candles")
     if all_candles:
@@ -489,7 +475,7 @@ def main():
     print()
 
     # Step 1: Fetch data
-    candles = fetch_binance_klines(total_candles)
+    candles = fetch_pyth_klines(total_candles)
     if len(candles) < 10:
         print("  ❌ Not enough data.")
         sys.exit(1)

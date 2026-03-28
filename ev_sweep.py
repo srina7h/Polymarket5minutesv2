@@ -44,7 +44,7 @@ def fetch_binance_klines(total_candles: int) -> list:
 
     while remaining > 0:
         batch = min(remaining, 1000)
-        params = {"symbol": "BTCUSDT", "interval": "1m", "limit": batch}
+        params = {"symbol": "BTCUSDC", "interval": "1m", "limit": batch}
         if end_time:
             params["endTime"] = end_time - 1
         try:
@@ -182,12 +182,12 @@ def run_fast_backtest(windows, capital, min_gap, pos_pct):
 
 def main():
     CAPITAL = 100
-    DAYS = 3
+    DAYS = 5
     total_candles = int(DAYS * 24 * 60)
 
     # Parameter grid
-    gaps = [0.03, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.12, 0.15]
-    positions = [0.02, 0.03, 0.05, 0.07, 0.10]
+    gaps = [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.25]
+    positions = [0.05]  # Static size equivalent to our $5 flat live sizing
     combos = list(product(gaps, positions))
 
     print(f"\n{C.BOLD}{C.MAGENTA}{'═' * 72}{C.RESET}")

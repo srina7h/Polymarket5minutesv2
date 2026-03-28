@@ -189,20 +189,20 @@ def fetch_real_market_prob(client: ClobClient, token_id: str) -> float:
 
 def fetch_btc_candles() -> list:
     """
-    Fetches the last 5 one-minute BTC candles from Binance
-    in the structured format expected by ev_strategy.estimate_true_probability.
-    Returns list of dicts with keys: open, close, high, low, volume, timestamp.
+    Fetches the last 10 one-minute BTC/USDC candles from Binance.
+    We fetch 10 to ensure we have sufficient overlap with the current
+    5-min Polymarket window, including the live streaming minute.
     """
     try:
         resp = requests.get(
             "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1m", "limit": 5},
+            params={"symbol": "BTCUSDC", "interval": "1m", "limit": 10},
             timeout=10,
         )
         resp.raise_for_status()
         raw = resp.json()
 
-        if len(raw) < 5:
+        if not raw:
             return None
 
         candles = []
@@ -217,7 +217,7 @@ def fetch_btc_candles() -> list:
             })
         return candles
     except Exception as e:
-        print(f"  {C.RED}  Binance error: {e}{C.RESET}")
+        print(f"  {C.RED}  Binance API error: {e}{C.RESET}")
         return None
 
 
@@ -265,6 +265,41 @@ def execute_trade(client: ClobClient, market: dict, direction: str,
         return False
 
 
+def calculate_actual_payout(trade: dict) -> float:
+    """
+    Queries Pyth to see what the actual BTC price was at window_start and window_end.
+    Returns the PnL of this trade if the market finished.
+    Returns None if still active.
+    """
+    now = time.time()
+    if now < trade["window_end"]:
+        return None  # Still active
+
+    try:
+        url = f"https://benchmarks.pyth.network/v1/shims/tradingview/history?symbol=Crypto.BTC%2FUSD&resolution=1&from={trade['window_start']}&to={trade['window_end']}"
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get("s") != "ok":
+            return None
+        
+        oracle_open = float(data["o"][0])
+        oracle_close = float(data["c"][-1])
+        
+        won = False
+        if trade["direction"] == "UP" and oracle_close > oracle_open:
+            won = True
+        elif trade["direction"] == "DOWN" and oracle_close < oracle_open:
+            won = True
+            
+        if won:
+            # Polymarket YES/NO pays out $1.00 per share.
+            shares = trade["size"] / trade["price"]
+            return (shares * 1.0) - trade["size"]
+        else:
+            return -trade["size"]
+    except Exception:
+        return None
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Main Loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -285,15 +320,54 @@ def main():
     # Track state
     last_window = None
     traded_this_window = False
-    wins = 0; losses = 0; total_trades = 0
+    total_trades = 0
+    successful_trades = []
+    
+    # Risk State
+    settled_pnl = 0.0
+    consecutive_losses = 0
+    cooldown_until = 0
 
     print(f"\n  {C.BOLD}Monitoring 5-minute windows...{C.RESET} (Ctrl+C to stop)\n")
 
     try:
         while True:
             now_utc = datetime.now(timezone.utc)
+            now_ts = time.time()
 
-            # 1. Discover current market
+            # ── 1. Live Risk Management & Settlement Tracking ──
+            for t in successful_trades:
+                if not t.get("settled"):
+                    payout = calculate_actual_payout(t)
+                    if payout is not None:
+                        t["settled"] = True
+                        t["payout"] = payout
+                        settled_pnl += payout
+                        if payout < 0:
+                            consecutive_losses += 1
+                            print(f"\\n  {C.RED}Trade Settled: LOSS (${abs(payout):.2f}) | Consec: {consecutive_losses}{C.RESET}")
+                        else:
+                            consecutive_losses = 0
+                            print(f"\\n  {C.GREEN}Trade Settled: WIN (+${payout:.2f}) | Consec: 0{C.RESET}")
+
+            # Enforce constraints
+            if consecutive_losses >= getattr(config, "MAX_CONSECUTIVE_LOSSES", 3):
+                cd = getattr(config, "COOLDOWN_SECONDS", 1800)
+                print(f"\\n  {C.RED}🛑 RISK LIMIT: {consecutive_losses} consecutive losses. Activating {cd//60}m cooldown.{C.RESET}")
+                cooldown_until = now_ts + cd
+                consecutive_losses = 0  # Reset so it doesn't loop infinitely
+                
+            if now_ts < cooldown_until:
+                print(f"  {C.YELLOW}⏳ Cooldown active. {int(cooldown_until - now_ts)}s remaining...{C.RESET}")
+                time.sleep(15)
+                continue
+                
+            max_trades = getattr(config, "MAX_TRADES_PER_DAY", 15)
+            if len(successful_trades) >= max_trades:
+                print(f"\\n  {C.YELLOW}🛑 RISK LIMIT: Daily max trades ({max_trades}) reached. Bot shutting down.{C.RESET}\\n")
+                break # Exit loop gracefully
+
+            # ── 2. Discover current market ──
             market = get_active_btc_market(client)
 
             if not market:
@@ -328,22 +402,31 @@ def main():
                 continue
 
             # 3. Fetch real data
-            candles = fetch_btc_candles()
-            if not candles or len(candles) < 4:
+            raw_candles = fetch_btc_candles()
+            if not raw_candles:
                 print(f"  {C.RED}Failed to get BTC candles. Retrying in 10s.{C.RESET}")
                 time.sleep(10)
                 continue
+                
+            # Filter candles precisely to the Polymarket window bounds!
+            target_ts_ms = market["window_start"] * 1000
+            window_candles = [c for c in raw_candles if c["timestamp"] >= target_ts_ms]
+            
+            if not window_candles:
+                print(f"  {C.DIM}Waiting for exact window open candle...{C.RESET}")
+                time.sleep(5)
+                continue
 
-            # Use first candle open as oracle price (price at window start)
-            oracle_open = candles[0]["open"]
-            spot_price = candles[-1]["close"]
+            # Use perfectly anchored first candle open as exact oracle price
+            oracle_open = window_candles[0]["open"]
+            spot_price = window_candles[-1]["close"]
             spot_delta = spot_price - oracle_open
 
             real_prob_up = fetch_real_market_prob(client, market["yes_token"])
             real_prob_down = fetch_real_market_prob(client, market["no_token"])
 
-            # 4. Compute model probability using ev_strategy
-            model = estimate_true_probability(oracle_open, candles)
+            # 4. Compute model probability using ev_strategy (needs recent history)
+            model = estimate_true_probability(oracle_open, raw_candles)
             model_prob_up = model["prob_up"]
             model_prob_down = model["prob_down"]
 
@@ -361,11 +444,25 @@ def main():
             pos_usd = config.LIVE_TRADE_AMOUNT_USD
 
             if ev_gap_up >= config.EV_MIN_GAP and real_prob_up <= config.EV_MAX_MARKET_PROB:
-                execute_trade(client, market, "UP", ev_gap_up, pos_usd)
+                if execute_trade(client, market, "UP", ev_gap_up, pos_usd):
+                    successful_trades.append({
+                        "window_start": market["window_start"],
+                        "window_end": market["window_start"] + 300,
+                        "direction": "UP",
+                        "size": pos_usd,
+                        "price": real_prob_up
+                    })
                 traded_this_window = True
                 total_trades += 1
             elif ev_gap_down >= config.EV_MIN_GAP and real_prob_down <= config.EV_MAX_MARKET_PROB:
-                execute_trade(client, market, "DOWN", ev_gap_down, pos_usd)
+                if execute_trade(client, market, "DOWN", ev_gap_down, pos_usd):
+                    successful_trades.append({
+                        "window_start": market["window_start"],
+                        "window_end": market["window_start"] + 300,
+                        "direction": "DOWN",
+                        "size": pos_usd,
+                        "price": real_prob_down
+                    })
                 traded_this_window = True
                 total_trades += 1
             else:
@@ -374,9 +471,26 @@ def main():
             time.sleep(15)
 
     except KeyboardInterrupt:
-        print(f"\n\n{C.YELLOW}{'═' * 40}{C.RESET}")
-        print(f"  {C.YELLOW}Bot stopped. Total trades: {total_trades}{C.RESET}")
-        print(f"{C.YELLOW}{'═' * 40}{C.RESET}\n")
+        print(f"\n\n{C.YELLOW}{'═' * 45}{C.RESET}")
+        print(f"  {C.YELLOW}Bot stopped. Total trades executed: {len(successful_trades)}{C.RESET}")
+        
+        if successful_trades:
+            print(f"  {C.CYAN}Fetching settlements from Pyth Oracle...{C.RESET}")
+            session_pnl = 0.0
+            pending = 0
+            for t in successful_trades:
+                payout = calculate_actual_payout(t)
+                if payout is None:
+                    pending += 1
+                else:
+                    session_pnl += payout
+            
+            color = C.GREEN if session_pnl > 0 else C.RED if session_pnl < 0 else C.BOLD
+            print(f"  {color}Session Settled PnL: ${session_pnl:+.2f}{C.RESET}")
+            if pending > 0:
+                print(f"  {C.DIM}({pending} trades actively awaiting window close){C.RESET}")
+                
+        print(f"{C.YELLOW}{'═' * 45}{C.RESET}\n")
 
 
 if __name__ == "__main__":

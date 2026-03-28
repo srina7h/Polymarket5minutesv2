@@ -25,15 +25,14 @@ import config
 def estimate_true_probability(oracle_open: float, candles: list) -> dict:
     """
     Estimate the TRUE probability that BTC will close above oracle_open,
-    based on current spot data (candles 3-4).
+    based on current spot data trailing up to the last known candle.
 
     Uses:
       1. Spot delta magnitude → base probability shift
       2. Momentum (cumulative direction) → confidence boost
       3. Volatility → uncertainty penalty
 
-    Returns: {'prob_up': float, 'prob_down': float, 'direction': str,
-              'spot_delta': float, 'momentum_score': float}
+    Returns: {'prob_up': float, 'prob_down': float, 'direction': str, ...}
     """
     if len(candles) < 4:
         return {
@@ -41,19 +40,18 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
             "spot_delta": 0.0, "momentum_score": 0.0,
         }
 
-    # Current spot (candle 4 close, ~T+240s)
-    spot_price = candles[3]["close"]
+    # Current spot (absolute latest candle close)
+    spot_price = candles[-1]["close"]
     spot_delta = spot_price - oracle_open
 
     # ── 1. Base probability from spot delta ──────────
-    # Map delta to probability: larger moves → higher conviction
-    # $200 move = near-certainty, $50 = modest edge
     magnitude = min(abs(spot_delta) / config.PRICE_NORMALIZATION_USD, 1.0)
     base_prob = 0.50 + (0.45 * magnitude)  # 0.50 → 0.95
 
     # ── 2. Momentum: cumulative direction consistency ──
     cum_deltas = []
-    for c in candles[:4]:
+    # Trailing 4 minutes leading up to now
+    for c in candles[-4:]:
         cum_deltas.append(c["close"] - oracle_open)
 
     positive = sum(1 for d in cum_deltas if d > 0)
@@ -61,7 +59,6 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
     dominant = max(positive, negative)
     total = len(cum_deltas)
 
-    # Momentum boost: 4/4 consistent → +0.05, 3/4 → +0.02
     if total > 0:
         consistency_ratio = dominant / total
         momentum_boost = max(0, (consistency_ratio - 0.50) * 0.10)
@@ -71,7 +68,7 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
 
     # ── 3. Volatility penalty ─────────────────────────
     candle_ranges = []
-    for c in candles[:4]:
+    for c in candles[-4:]:
         if c["open"] > 0:
             candle_ranges.append(abs(c["close"] - c["open"]) / c["open"])
 
@@ -148,8 +145,9 @@ def evaluate_ev_gap(window: dict) -> dict:
     candles = window["candles"]
     oracle_open = window["open_price"]
 
-    # ── Step 1: Model probability (current data) ─────
-    model = estimate_true_probability(oracle_open, candles)
+    # ── Step 1: Model probability (simulate entry at T+240s) ─────
+    # We pass only the first 4 candles to prevent the backtester from seeing the final wrap
+    model = estimate_true_probability(oracle_open, candles[:4])
 
     # ── Step 2: Market probability (lagged data) ─────
     if len(candles) >= 2:

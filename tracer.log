@@ -1,0 +1,41 @@
+
+[1m[96m════════════════════════════════════════════════════════════[0m
+[1m[96m  🚀 Polymarket 5-Min BTC — LIVE EV GAP TRADER[0m
+[96m════════════════════════════════════════════════════════════[0m
+
+  Mode:          [93mDRY RUN[0m
+  Min EV Gap:    5%
+  Max Market:    75%
+  Trade Amount:  $5.00 per trade
+
+  [96mConnecting to Polymarket CLOB...[0m ✓ [92mConnected[0m
+
+  [1mMonitoring 5-minute windows...[0m (Ctrl+C to stop)
+
+  [2mWindow: 20:35:00 UTC  |  Slug: btc-updown-5m-1774470900  |  53s left[0m
+
+  [96m──────────────────────────────────────────────────[0m
+  [96m📊 New Window: Bitcoin Up or Down - March 25, 4:35PM-4:40PM ET[0m
+  BTC: $70,805  Δ=+84  Dir=UP
+    UP   │ Model: 70% │ Book: 50% │ Gap: [92m+19.6%[0m
+    DOWN │ Model: 30% │ Book: 50% │ Gap: [2m-19.6%[0m
+
+[1m[95m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  ⚡ [1m[DRY RUN] BUY UP[0m
+  Market:  Bitcoin Up or Down - March 25, 4:35PM-4:40PM ET
+  EV Gap:  19.6%
+  Size:    $5.00
+  [93m[DRY RUN] Would BUY $5.00 of UP token[0m
+  [2mToken: 10656174943318381046...[0m
+[95m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [2mWindow: 20:35:00 UTC  |  Slug: btc-updown-5m-1774470900  |  36s left[0m
+  [2mAlready traded this window. Sleeping 36s...[0m
+
+
+[93m═════════════════════════════════════════════[0m
+  [93mBot stopped. Total trades executed: 1[0m
+  [96mFetching settlements from Pyth Oracle...[0m
+  [1mSession Settled PnL: $+0.00[0m
+  [2m(1 trades actively awaiting window close)[0m
+[93m═════════════════════════════════════════════[0m
+

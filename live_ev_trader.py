@@ -221,6 +221,35 @@ def fetch_btc_candles() -> list:
         return None
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Polymarket Balance Query
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def fetch_usdc_balance(client) -> float:
+    """
+    Queries the Polymarket CLOB for the user's available USDC balance.
+    Polymarket holds funds inside their CTF Exchange contract, not in the
+    wallet directly, so we must use their API.
+    Returns balance in USD (float). Returns 0.0 on error.
+    """
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        result = client.get_balance_allowance(params)
+        if isinstance(result, dict):
+            raw = float(result.get("balance", 0))
+        else:
+            raw = float(result)
+        return raw / 1_000_000 if raw > 1000 else raw
+    except Exception:
+        try:
+            raw = float(client.get_balance())
+            return raw / 1_000_000 if raw > 1000 else raw
+        except Exception as e:
+            print(f"  {C.DIM}Balance check failed: {e}{C.RESET}")
+            return 0.0
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Order Execution
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -234,8 +263,6 @@ def execute_trade(client: ClobClient, market: dict, direction: str,
     print(f"  EV Gap:  {ev_gap:.1%}")
     print(f"  Size:    ${position_usd:.2f}")
 
-    # Hard cap
-    position_usd = min(position_usd, config.LIVE_TRADE_AMOUNT_USD)
     token_id = market["yes_token"] if direction == "UP" else market["no_token"]
 
     if config.LIVE_DRY_RUN:
@@ -389,14 +416,16 @@ def main():
                 time.sleep(wait)
                 continue
 
-            # 2. Only trade in the sweet spot: 60-180 seconds into the window
+            # 2. LATE CONFIRMATION: Only trade 150-255s into window (2.5-4.25 min)
+            #    By waiting 2.5 minutes, BTC's direction is well-established
+            #    and only 2.5 minutes remain for a reversal (much safer)
             elapsed = 300 - market["secs_remaining"]
-            if elapsed < 60:
-                wait = 60 - elapsed
-                print(f"  {C.DIM}Too early ({elapsed}s in). Waiting {wait}s for data...{C.RESET}")
-                time.sleep(wait)
+            if elapsed < 150:
+                wait = 150 - elapsed
+                print(f"  {C.DIM}Waiting for confirmation ({elapsed}s in, need 150s)... {wait}s{C.RESET}")
+                time.sleep(min(wait, 30))  # Check every 30s at most
                 continue
-            if market["secs_remaining"] < 30:
+            if market["secs_remaining"] < 45:
                 print(f"  {C.DIM}Too late ({market['secs_remaining']}s left). Skipping window.{C.RESET}")
                 traded_this_window = True
                 continue
@@ -440,27 +469,57 @@ def main():
             print(f"    DOWN │ Model: {model_prob_down:.0%} │ Book: {real_prob_down:.0%} │ "
                   f"Gap: {C.GREEN if ev_gap_down >= config.EV_MIN_GAP else C.DIM}{ev_gap_down:+.1%}{C.RESET}")
 
-            # 6. Decision
-            pos_usd = config.LIVE_TRADE_AMOUNT_USD
+            # 6. Decision & Dynamic Sizing v2 (BALANCE-AWARE)
+            market_mode = model.get("market_mode", "neutral")
+            base_size = config.LIVE_TRADE_AMOUNT_USD
+            
+            # Query real wallet balance before sizing
+            wallet_balance = fetch_usdc_balance(client)
+            print(f"  {C.DIM}Wallet USDC: ${wallet_balance:.2f}{C.RESET}")
+            
+            if wallet_balance < 1.0:
+                print(f"  {C.RED}⚠ Insufficient balance (${wallet_balance:.2f}). Waiting for settlement...{C.RESET}")
+                time.sleep(30)  # Wait for previous trade to settle, then retry
+                continue
+            
+            def get_v2_size(edge):
+                if edge >= 0.20: return base_size * 3.0
+                if edge >= 0.10: return base_size * 2.0
+                return base_size * 1.0
+
+            pos_usd_up = get_v2_size(ev_gap_up)
+            pos_usd_down = get_v2_size(ev_gap_down)
+
+            # Volatility regime penalty: reduce size by 50% in chaos mode
+            if market_mode == "chaos":
+                pos_usd_up *= 0.5
+                pos_usd_down *= 0.5
+            
+            # CRITICAL: Cap to actual wallet balance AND orderbook liquidity
+            MAX_ORDER_SIZE = 5.00  # Polymarket 5-min books can reliably fill up to ~$5
+            pos_usd_up = min(pos_usd_up, wallet_balance, MAX_ORDER_SIZE)
+            pos_usd_down = min(pos_usd_down, wallet_balance, MAX_ORDER_SIZE)
 
             if ev_gap_up >= config.EV_MIN_GAP and real_prob_up <= config.EV_MAX_MARKET_PROB:
-                if execute_trade(client, market, "UP", ev_gap_up, pos_usd):
+                print(f"  {C.YELLOW}⚡ V2 Sizing: {market_mode.upper()} | Edge {ev_gap_up:.0%} | Allocation ${pos_usd_up:.2f} / ${wallet_balance:.2f}{C.RESET}")
+                if execute_trade(client, market, "UP", ev_gap_up, pos_usd_up):
                     successful_trades.append({
                         "window_start": market["window_start"],
                         "window_end": market["window_start"] + 300,
                         "direction": "UP",
-                        "size": pos_usd,
+                        "size": pos_usd_up,
                         "price": real_prob_up
                     })
                 traded_this_window = True
                 total_trades += 1
             elif ev_gap_down >= config.EV_MIN_GAP and real_prob_down <= config.EV_MAX_MARKET_PROB:
-                if execute_trade(client, market, "DOWN", ev_gap_down, pos_usd):
+                print(f"  {C.YELLOW}⚡ V2 Sizing: {market_mode.upper()} | Edge {ev_gap_down:.0%} | Allocation ${pos_usd_down:.2f} / ${wallet_balance:.2f}{C.RESET}")
+                if execute_trade(client, market, "DOWN", ev_gap_down, pos_usd_down):
                     successful_trades.append({
                         "window_start": market["window_start"],
                         "window_end": market["window_start"] + 300,
                         "direction": "DOWN",
-                        "size": pos_usd,
+                        "size": pos_usd_down,
                         "price": real_prob_down
                     })
                 traded_this_window = True

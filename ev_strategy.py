@@ -37,16 +37,23 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
     if len(candles) < 4:
         return {
             "prob_up": 0.50, "prob_down": 0.50, "direction": "FLAT",
-            "spot_delta": 0.0, "momentum_score": 0.0,
+            "spot_delta": 0.0, "momentum_score": 0.0, "market_mode": "neutral"
         }
 
     # Current spot (absolute latest candle close)
     spot_price = candles[-1]["close"]
     spot_delta = spot_price - oracle_open
+    delta_abs = abs(spot_delta)
 
     # ── 1. Base probability from spot delta ──────────
-    magnitude = min(abs(spot_delta) / config.PRICE_NORMALIZATION_USD, 1.0)
-    base_prob = 0.50 + (0.45 * magnitude)  # 0.50 → 0.95
+    # Keep the continuous normalization, but apply V2 explicit step-boosts
+    magnitude = min(delta_abs / config.PRICE_NORMALIZATION_USD, 1.0)
+    base_prob = 0.50 + (0.45 * magnitude)
+
+    if delta_abs > 100:
+        base_prob += 0.10
+    elif delta_abs > 50:
+        base_prob += 0.05
 
     # ── 2. Momentum: cumulative direction consistency ──
     cum_deltas = []
@@ -61,26 +68,53 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
 
     if total > 0:
         consistency_ratio = dominant / total
-        momentum_boost = max(0, (consistency_ratio - 0.50) * 0.10)
+        # V2 Explicit Rules: 4/4 = +0.05, 3/4 = +0.03
+        if dominant == 4:
+            momentum_boost = 0.05
+        elif dominant == 3:
+            momentum_boost = 0.03
+        else:
+            momentum_boost = 0.0
     else:
         momentum_boost = 0.0
         consistency_ratio = 0.0
 
-    # ── 3. Volatility penalty ─────────────────────────
+    # ── 3. Acceleration (Speed Signal) ────────────────
+    # Pseudo-metric for price_now - price_10s_ago. Uses the live minute's immediate burst.
+    live_minute_open = candles[-1]["open"]
+    acceleration = abs(spot_price - live_minute_open)
+    accel_boost = 0.0
+    
+    threshold_fast = 20.0
+    threshold_med = 10.0
+    
+    if acceleration > threshold_fast:
+        accel_boost = 0.05
+    elif acceleration > threshold_med:
+        accel_boost = 0.02
+
+    # ── 4. Volatility Regime (Improved Noise Filter) ──
     candle_ranges = []
     for c in candles[-4:]:
         if c["open"] > 0:
             candle_ranges.append(abs(c["close"] - c["open"]) / c["open"])
 
     vol_penalty = 0.0
+    market_mode = "neutral"
+    
     if len(candle_ranges) >= 2:
         vol = statistics.stdev(candle_ranges)
         avg = statistics.mean(candle_ranges)
-        if avg > 0 and vol / avg > config.MAX_VOLATILITY_MULTIPLIER:
-            vol_penalty = 0.05  # High volatility reduces confidence
+        if avg > 0:
+            vol_ratio = vol / avg
+            if vol_ratio > getattr(config, "MAX_VOLATILITY_MULTIPLIER", 1.5):
+                vol_penalty = 0.05
+                market_mode = "chaos"
+            elif vol_ratio < 0.5:
+                market_mode = "trend"
 
     # ── Combine ───────────────────────────────────────
-    model_prob = base_prob + momentum_boost - vol_penalty
+    model_prob = base_prob + momentum_boost + accel_boost - vol_penalty
     model_prob = max(0.02, min(0.98, model_prob))
 
     direction = "UP" if spot_delta >= 0 else "DOWN"
@@ -91,10 +125,12 @@ def estimate_true_probability(oracle_open: float, candles: list) -> dict:
         "prob_up": round(prob_up, 4),
         "prob_down": round(prob_down, 4),
         "direction": direction,
+        "market_mode": market_mode,
         "spot_delta": round(spot_delta, 2),
         "momentum_score": round(consistency_ratio, 2),
         "momentum_boost": round(momentum_boost, 4),
         "vol_penalty": round(vol_penalty, 4),
+        "accel_boost": round(accel_boost, 4),
         "base_prob": round(base_prob, 4),
     }
 
